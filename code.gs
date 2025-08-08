@@ -48,11 +48,9 @@ function onOpen() {
  */
 function onEdit(e) {
   try {
-    Logger.log("onEdit triggered");
     // Set categorization source to "USER" for manually categorized transactions
     const editedRange = e.range;
     const sheet = editedRange.getSheet();
-    Logger.log("Sheet ID: " + sheet.getSheetId());
     // Check if this is the transactions sheet
     if (sheet.getSheetId() != TRANSACTIONS_SHEET_ID) {
       return; // Exit if not in the transactions sheet
@@ -64,17 +62,13 @@ function onEdit(e) {
     const LASTROW = Math.min(editedRange.getLastRow(), categoriesRange.getLastRow());
     const FIRSTCOL = Math.max(editedRange.getColumn(), categoriesRange.getColumn());
     const LASTCOL = Math.min(editedRange.getLastColumn(), categoriesRange.getLastColumn());
-    Logger.log("FIRSTROW: " + FIRSTROW);
-    Logger.log("LASTROW: " + LASTROW);
-    Logger.log("FIRSTCOL: " + FIRSTCOL);
-    Logger.log("LASTCOL: " + LASTCOL);
 
     if (FIRSTROW > LASTROW || FIRSTCOL > LASTCOL) return; // Exit if no categories were edited
     
     // For each edited row, set the corresponding source cell to "USER"
     for (let row = FIRSTROW; row <= LASTROW; row++) {
       const category = sheet.getRange(row, FIRSTCOL).getValue();
-      if (!category) return;
+      if (!category) continue;
       
       // Set the source column to "USER"
       const sourceCell = sheet.getRange(row, 11); // Categorization source is the 11th column
@@ -133,7 +127,7 @@ function getLinkToken() {
 }
 
 /**
- * Exchanges a public token for an access token and item ID.
+ * Exchanges a public token for an access token and item ID. Then adds the newly connected bank and syncs transactions.
  * @param {string} publicToken - The public token received from Plaid Link.
  * @param {Object} metadata - Metadata from Plaid Link including institution information.
  * @return {Object} Object containing success status and access token or error.
@@ -156,8 +150,33 @@ function exchangePublicToken(publicToken, metadata) {
     const response = UrlFetchApp.fetch(url, options);
     const responseData = JSON.parse(response.getContentText());
     
+    // Add the newly connected bank and sync transactions
+    const result = addNewlyConnectedBank(responseData.access_token, responseData.item_id, metadata);
+    
+    return { 
+      success: true, 
+      institution_name: result.institution_name,
+      access_token: responseData.access_token,
+      item_id: responseData.item_id,
+      transactions_synced: result.transactions_synced
+    };
+  } catch (error) {
+    Logger.log(`Error exchanging public token: ${error}`);
+    return { success: false, error: error.toString() };
+  }
+}
+
+/**
+ * Adds a newly connected bank to script properties and syncs transactions.
+ * @param {string} accessToken - The access token received from Plaid.
+ * @param {string} itemId - The item ID received from Plaid.
+ * @param {Object} metadata - Metadata from Plaid Link including institution and accounts information.
+ * @return {Object} Object containing success status, institution name, and transaction sync result.
+ */
+function addNewlyConnectedBank(accessToken, itemId, metadata) {
+  try {
     // Get institution information
-    const institutionName = metadata && metadata.institution ? metadata.institution.name : "Unknown Bank";
+    const institutionName = getInstitutionName(metadata);
     const institutionId = metadata && metadata.institution ? metadata.institution.institution_id : "unknown";
     
     // Store the access token and institution info in script properties with a unique key
@@ -165,8 +184,8 @@ function exchangePublicToken(publicToken, metadata) {
     const bankKey = `bank_${new Date().getTime()}`; // Generate a unique key for this bank
     
     const bankInfo = {
-      access_token: responseData.access_token,
-      item_id: responseData.item_id,
+      access_token: accessToken,
+      item_id: itemId,
       institution_name: institutionName,
       institution_id: institutionId,
       date_added: new Date().toISOString()
@@ -201,16 +220,29 @@ function exchangePublicToken(publicToken, metadata) {
     const transactionResult = syncTransactions();
     
     return { 
-      success: true, 
+      success: true,
       institution_name: institutionName,
-      access_token: responseData.access_token,
-      item_id: responseData.item_id,
-      transactions_synced: transactionResult.success
+      transactions_synced: transactionResult.success 
     };
   } catch (error) {
-    Logger.log(`Error exchanging public token: ${error}`);
-    return { success: false, error: error.toString() };
+    Logger.log(`Error adding newly connected bank: ${error}`);
+    return { success: false, error: error.toString(), transactions_synced: false };
   }
+}
+
+/**
+ * Extracts the institution name from metadata and formats for the Configuration sheet.
+ * @param {Object} metadata - Metadata from Plaid Link including institution information.
+ * @return {string} The institution name or "Unknown Bank" if not found.
+ */
+function getInstitutionName(metadata) {
+  let institutionName = metadata.institution ? metadata.institution.name : "Unknown Bank";
+  // Ensure no dash in institution name (will mess up formatting on config sheet)
+  const dashIndex = institutionName.indexOf(" - ");
+  if (dashIndex !== -1) {
+    institutionName = institutionName.substring(0, dashIndex);
+  }
+  return institutionName;
 }
 
 /**
@@ -220,14 +252,11 @@ function exchangePublicToken(publicToken, metadata) {
 function addAccountsToConfigSheet(metadata) {
   try {
     // If no metadata or accounts, use institution name as fallback
+    const institutionName = getInstitutionName(metadata);
     if (!metadata || !metadata.accounts || metadata.accounts.length === 0) {
-      const institutionName = metadata && metadata.institution ? metadata.institution.name : "Unknown Bank";
-      // Default to bank account column if no account type info is available
-      addSingleAccountToConfigSheet(institutionName, false);
+      addSingleAccountToConfigSheet(institutionName, false); // Default to bank account column if no account type info is available
       return;
     }
-    
-    const institutionName = metadata.institution ? metadata.institution.name : "Unknown Bank";
     
     // Add each account with institution name prefix
     metadata.accounts.forEach(account => {
@@ -298,17 +327,6 @@ function addSingleAccountToConfigSheet(accountName, isCreditCard) {
 }
 
 /**
- * Connects to a bank via Plaid and fetches transactions.
- * This is the main function that will be called from the UI.
- * It's a wrapper around the HTML interface that uses Plaid Link.
- */
-function connectToBank() {
-  // This function is primarily a trigger for the dialog HTML
-  // The actual connection happens via the HTML interface and the getLinkToken/exchangePublicToken functions
-  showPlaidConnectDialog();
-}
-
-/**
  * Synchronizes the banks in script properties with those in the configuration sheet.
  * Removes banks from script properties that are no longer in the configuration sheet.
  * @return {Object} Object containing arrays of active banks and removed banks.
@@ -363,6 +381,7 @@ function syncBanksWithConfigSheet() {
         removedBanks.push(bank);
         // Remove the bank's data from script properties
         scriptProperties.deleteProperty(bank.key);
+        Logger.log(`Removed bank: ${bank.name} since it was missing from the config sheet.`);
       }
     });
     
@@ -489,7 +508,7 @@ function syncPlaidTransactions() {
     let removedBanksMessage = "";
     if (syncResult.removedBanks && syncResult.removedBanks.length > 0) {
       const removedNames = syncResult.removedBanks.map(bank => bank.name).join(", ");
-      removedBanksMessage = `Removed ${syncResult.removedBanks.length} banks no longer in configuration: ${removedNames}. `;
+      removedBanksMessage = `Removed ${syncResult.removedBanks.length} banks no longer in configuration sheet: ${removedNames}.\n`;
     }
     
     // Get the active banks list
@@ -503,8 +522,8 @@ function syncPlaidTransactions() {
     let modifiedTransactions = [];
     let removedTransactionIds = [];
     let allAccounts = [];
-    let successfulBanks = 0;
-    let failedBanks = 0;
+    let successfulBanks = [];
+    let failedBanks = [];
     
     // Process each active bank
     for (const bank of activeBanks) {
@@ -514,7 +533,7 @@ function syncPlaidTransactions() {
         const bankInfoJson = scriptProperties.getProperty(bank.key);
         if (!bankInfoJson) {
           Logger.log(`No bank info found for key: ${bank.key}`);
-          failedBanks++;
+          failedBanks.push(bank.name);
           continue;
         }
         
@@ -559,9 +578,6 @@ function syncPlaidTransactions() {
           
           // Process added transactions
           if (responseData.added && responseData.added.length > 0) {
-            // Log the number of added transactions in this batch
-            Logger.log(`Fetched ${responseData.added.length} added transactions`);
-            
             // Add institution name to each transaction for better identification
             responseData.added.forEach(transaction => {
               transaction.institution_name = bankInfo.institution_name;
@@ -569,13 +585,12 @@ function syncPlaidTransactions() {
             
             // Add this batch to our bank's added transactions
             bankAddedTransactions = bankAddedTransactions.concat(responseData.added);
+
+            Logger.log("Added transactions:\n" + JSON.stringify(responseData.added));
           }
           
           // Process modified transactions
           if (responseData.modified && responseData.modified.length > 0) {
-            // Log the number of modified transactions in this batch
-            Logger.log(`Fetched ${responseData.modified.length} modified transactions`);
-            
             // Add institution name to each transaction for better identification
             responseData.modified.forEach(transaction => {
               transaction.institution_name = bankInfo.institution_name;
@@ -583,16 +598,17 @@ function syncPlaidTransactions() {
             
             // Add this batch to our bank's modified transactions
             bankModifiedTransactions = bankModifiedTransactions.concat(responseData.modified);
+
+            Logger.log("Modified transactions:\n" + JSON.stringify(responseData.modified));
           }
           
           // Process removed transactions
           if (responseData.removed && responseData.removed.length > 0) {
-            // Log the number of removed transactions in this batch
-            Logger.log(`Fetched ${responseData.removed.length} removed transactions`);
-            
             // Add this batch to our bank's removed transaction IDs
             const removedIds = responseData.removed.map(item => item.transaction_id);
             bankRemovedTransactionIds = bankRemovedTransactionIds.concat(removedIds);
+
+            Logger.log("Removed transactions:\n" + JSON.stringify(responseData.removed));
           }
           
           // Add accounts if present
@@ -637,20 +653,18 @@ function syncPlaidTransactions() {
           modifiedTransactions = modifiedTransactions.concat(bankModifiedTransactions);
           removedTransactionIds = removedTransactionIds.concat(bankRemovedTransactionIds);
           allAccounts = allAccounts.concat(bankAccounts);
-          successfulBanks++;
+          successfulBanks.push(bank.name);
         }
       } catch (bankError) {
         Logger.log(`Error fetching transactions for bank ${bank.name}: ${bankError}`);
-        failedBanks++;
+        failedBanks.push(bank.name);
       }
     }
     
-    // Process the transactions
-    let updatedTransactions;
-    
+    // Process the transactions and combine with existing transactions
     if (addedTransactions.length > 0 || modifiedTransactions.length > 0 || removedTransactionIds.length > 0) {
       // Process transactions with the sync endpoint results
-      updatedTransactions = getUpdatedTransactions(
+      let updatedTransactions = getUpdatedTransactions(
         addedTransactions, 
         modifiedTransactions, 
         removedTransactionIds, 
@@ -658,8 +672,8 @@ function syncPlaidTransactions() {
       );
       
       // Write all transactions to the sheet
-      if (updatedTransactions.transactions.length > 0) {
-        const result = writeTransactionsToSheet(updatedTransactions.transactions);
+      if (updatedTransactions.length > 0) {
+        const result = writeTransactionsToSheet(updatedTransactions);
         
         if (result.success) {
           const addedCount = addedTransactions.length;
@@ -668,9 +682,10 @@ function syncPlaidTransactions() {
           
           return {
             success: true, 
-            message: `${removedBanksMessage}Successfully synced transactions from ${successfulBanks} banks. ` +
+            message: `Successfully synced transactions from ${successfulBanks.length} banks: ${successfulBanks.join(", ")}\n` +
+                    `${removedBanksMessage}` +
                     `Added: ${addedCount}, Modified: ${modifiedCount}, Removed: ${removedCount}. ` +
-                    `${failedBanks > 0 ? `Failed to sync ${failedBanks} banks.` : ''}` 
+                    `${failedBanks.length > 0 ? `Failed to sync ${failedBanks.length} banks: ${failedBanks.join(", ")}` : ''}` 
           };
         } else {
           return result; // Pass through any errors from writeTransactionsToSheet
@@ -933,8 +948,7 @@ function categorizeWithGemini(row, validCategories) {
   const prompt = `Categorize this financial transaction into exactly one of the following categories:\n${validCategories.join("\n")}\n\nTransaction details:\nMemo: ${memo}\nPersonal Finance Category according to Plaid: ${plaid_personal_finance_category}\n\nCategory:`;  
   
   // Log the transaction and prompt being sent to Gemini
-  Logger.log(`Sending to Gemini - Transaction: "${memo}" Amount: ${amount} Account: ${account}`);
-  Logger.log(`Gemini prompt: ${prompt}`);
+  Logger.log(`Sending to Gemini - Transaction: "${memo}" Plaid personal finance category: ${plaid_personal_finance_category}`);
   
   // Call Gemini API
   const url = `${GEMINI_API_URL}?key=${GEMINI_API_KEY}`;
@@ -967,31 +981,18 @@ function categorizeWithGemini(row, validCategories) {
     const response = UrlFetchApp.fetch(url, options);
     const responseData = JSON.parse(response.getContentText());
     
-    // Log the response from Gemini
-    Logger.log(`Gemini response: ${response.getContentText()}`);
-    
     if (responseData.candidates && responseData.candidates.length > 0) {
       const generatedText = responseData.candidates[0].content.parts[0].text.trim();
-      Logger.log(`Gemini generated text: "${generatedText}"`);
-      
-      // Find the closest matching category from the valid categories
+
+      // Find the matching category (relevant in case category has emojis)
       const matchingCategory = validCategories.find(category => 
-        generatedText.includes(category) || category.includes(generatedText)
+        category.includes(generatedText)
       );
-      
-      if (matchingCategory) {
-        return matchingCategory;
-      }
-      
-      // If no exact match, try to find the closest match
-      for (const category of validCategories) {
-        if (generatedText.toLowerCase().includes(category.toLowerCase())) {
-          return category;
-        }
-      }
+      return matchingCategory || generatedText;
+    } else {
+      Logger.log(`Gemini returned no candidates for transaction. Gemini response: ${response.getContentText()}`);
+      return "";
     }
-    
-    return "";
   } catch (error) {
     Logger.log(`Error calling Gemini API: ${error}`);
     return "";
@@ -999,12 +1000,12 @@ function categorizeWithGemini(row, validCategories) {
 }
 
 /**
- * Processes transactions from the Plaid /transactions/sync endpoint.
+ * Updates the existing transactions in the sheet with the added/modified/deleted transactions from the Plaid endpoint.
  * @param {Array} addedTransactions - Array of added transaction objects from Plaid.
  * @param {Array} modifiedTransactions - Array of modified transaction objects from Plaid.
  * @param {Array} removedTransactionIds - Array of removed transaction IDs from Plaid.
  * @param {Array} accounts - Array of account objects from Plaid.
- * @return {Object} Object containing processed transaction rows and accounts.
+ * @return {Array} Array of the combined/updated transaction rows.
  */
 function getUpdatedTransactions(addedTransactions, modifiedTransactions, removedTransactionIds, accounts) {
   // Read existing transactions from the sheet
@@ -1021,11 +1022,9 @@ function getUpdatedTransactions(addedTransactions, modifiedTransactions, removed
   // Process existing rows to build the map
   for (let i = 0; i < existingRows.length; i++) {
     const row = existingRows[i];
-    if (row[1] || row[2]) { // Check if row has data
-      const transactionId = getTransactionId(row);
-      if (transactionId) {
-        existingTransactionMap.set(transactionId, i);
-      }
+    const transactionId = getTransactionId(row);
+    if (transactionId) {
+      existingTransactionMap.set(transactionId, i);
     }
   }
   
@@ -1094,10 +1093,7 @@ function getUpdatedTransactions(addedTransactions, modifiedTransactions, removed
     return dateB - dateA; // Descending order (newest first)
   });
   
-  return {
-    transactions: allRows,
-    accounts: accounts
-  };
+  return allRows;
 }
 
 /**
