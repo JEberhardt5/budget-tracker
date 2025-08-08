@@ -85,9 +85,11 @@
             google.script.run
               .withSuccessHandler(function(response) {
                 if (response.success) {
-                  showStatus('Successfully connected to ' + response.institution_name + '! ' + 
-                             (response.transactions_synced ? 'Transactions synced.' : 'No transactions found.'), 
-                             'success');
+                  // Token exchange successful, now add the bank to the spreadsheet and start the connection process
+                  google.script.run.connectBankAndSync(response.access_token, response.item_id, metadata);
+                    
+                  // Let the user know they can close the window
+                  showStatus('Successfully connected! Transaction sync is running in the background. You can close this window now.', 'success');
                 } else {
                   showStatus('Error: ' + (response.error || 'Failed to exchange token'), 'error');
                 }
@@ -95,7 +97,7 @@
               .withFailureHandler(function(error) {
                 showStatus('Error: ' + error.message, 'error');
               })
-              .exchangePublicToken(public_token, metadata);
+              .exchangePublicToken(public_token);
           },
           onExit: function(err, metadata) {
             if (err != null) {

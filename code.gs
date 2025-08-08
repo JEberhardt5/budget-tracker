@@ -127,12 +127,11 @@ function getLinkToken() {
 }
 
 /**
- * Exchanges a public token for an access token and item ID. Then adds the newly connected bank and syncs transactions.
+ * Exchanges a public token for an access token and item ID.
  * @param {string} publicToken - The public token received from Plaid Link.
- * @param {Object} metadata - Metadata from Plaid Link including institution information.
- * @return {Object} Object containing success status and access token or error.
+ * @return {Object} Object containing success status, access token and item ID or error.
  */
-function exchangePublicToken(publicToken, metadata) {
+function exchangePublicToken(publicToken) {
   try {
     const url = `${PLAID_BASE_URL}/item/public_token/exchange`;
     const payload = {
@@ -150,15 +149,10 @@ function exchangePublicToken(publicToken, metadata) {
     const response = UrlFetchApp.fetch(url, options);
     const responseData = JSON.parse(response.getContentText());
     
-    // Add the newly connected bank and sync transactions
-    const result = addNewlyConnectedBank(responseData.access_token, responseData.item_id, metadata);
-    
     return { 
       success: true, 
-      institution_name: result.institution_name,
       access_token: responseData.access_token,
-      item_id: responseData.item_id,
-      transactions_synced: result.transactions_synced
+      item_id: responseData.item_id
     };
   } catch (error) {
     Logger.log(`Error exchanging public token: ${error}`);
@@ -167,31 +161,20 @@ function exchangePublicToken(publicToken, metadata) {
 }
 
 /**
- * Adds a newly connected bank to script properties and syncs transactions.
+ * Connects a bank after token exchange and starts syncing transactions.
  * @param {string} accessToken - The access token received from Plaid.
  * @param {string} itemId - The item ID received from Plaid.
- * @param {Object} metadata - Metadata from Plaid Link including institution and accounts information.
- * @return {Object} Object containing success status, institution name, and transaction sync result.
+ * @param {Object} metadata - Metadata from Plaid Link including institution information.
+ * @return {Object} Object containing success status, institution name and transaction sync status.
  */
-function addNewlyConnectedBank(accessToken, itemId, metadata) {
+function connectBankAndSync(accessToken, itemId, metadata) {
   try {
     // Get institution information
     const institutionName = getInstitutionName(metadata);
     const institutionId = metadata && metadata.institution ? metadata.institution.institution_id : "unknown";
     
-    // Store the access token and institution info in script properties with a unique key
-    const scriptProperties = PropertiesService.getScriptProperties();
-    const bankKey = `bank_${new Date().getTime()}`; // Generate a unique key for this bank
-    
-    const bankInfo = {
-      access_token: accessToken,
-      item_id: itemId,
-      institution_name: institutionName,
-      institution_id: institutionId,
-      date_added: new Date().toISOString()
-    };
-    
     // Get existing banks list or initialize a new one
+    const scriptProperties = PropertiesService.getScriptProperties();
     let banksList = [];
     const existingBanksJson = scriptProperties.getProperty('PLAID_BANKS_LIST');
     if (existingBanksJson) {
@@ -202,16 +185,28 @@ function addNewlyConnectedBank(accessToken, itemId, metadata) {
       }
     }
     
-    // Add the new bank to the list
-    banksList.push({
-      key: bankKey,
+    // Create a bank entry with all necessary information
+    const bankEntry = {
       name: institutionName,
-      id: institutionId
-    });
+      id: institutionId,
+      access_token: accessToken,
+      item_id: itemId,
+      date_added: new Date().toISOString(),
+      cursor: null // Initialize cursor as null
+    };
     
-    // Save the updated banks list and the new bank info
+    // Check if this institution already exists in the list
+    const existingBankIndex = banksList.findIndex(bank => bank.id === institutionId);
+    if (existingBankIndex >= 0) {
+      // Update existing entry
+      banksList[existingBankIndex] = bankEntry;
+    } else {
+      // Add as new entry
+      banksList.push(bankEntry);
+    }
+    
+    // Save the updated banks list with all bank info
     scriptProperties.setProperty('PLAID_BANKS_LIST', JSON.stringify(banksList));
-    scriptProperties.setProperty(bankKey, JSON.stringify(bankInfo));
     
     // Add the accounts to the configuration sheet
     addAccountsToConfigSheet(metadata);
@@ -225,7 +220,7 @@ function addNewlyConnectedBank(accessToken, itemId, metadata) {
       transactions_synced: transactionResult.success 
     };
   } catch (error) {
-    Logger.log(`Error adding newly connected bank: ${error}`);
+    Logger.log(`Error connecting bank: ${error}`);
     return { success: false, error: error.toString(), transactions_synced: false };
   }
 }
@@ -329,7 +324,7 @@ function addSingleAccountToConfigSheet(accountName, isCreditCard) {
 /**
  * Synchronizes the banks in script properties with those in the configuration sheet.
  * Removes banks from script properties that are no longer in the configuration sheet.
- * @return {Object} Object containing arrays of active banks and removed banks.
+ * @return {Object} Object containing arrays of active banks and removed banks. The banks are formatted the same as PLAID_BANKS_LIST in script properties.
  */
 function syncBanksWithConfigSheet() {
   try {
@@ -379,8 +374,6 @@ function syncBanksWithConfigSheet() {
         activeBanks.push(bank);
       } else {
         removedBanks.push(bank);
-        // Remove the bank's data from script properties
-        scriptProperties.deleteProperty(bank.key);
         Logger.log(`Removed bank: ${bank.name} since it was missing from the config sheet.`);
       }
     });
@@ -466,26 +459,12 @@ function resetSpreadsheet() {
     banksRange.clearContent();
     Logger.log('Cleared all banks from the configuration sheet');
     
-    // Clear all script properties related to banks and cursors
+    // Delete the PLAID_BANKS_LIST property which now contains all bank information
     const scriptProperties = PropertiesService.getScriptProperties();
-    const allProperties = scriptProperties.getProperties();
-    
-    // Create arrays to track what we're deleting
-    const deletedTokens = [];
-    const deletedCursors = [];
-    
-    // Delete all access tokens and cursors
-    for (const key in allProperties) {
-      if (key.startsWith('access_token_') || key.startsWith('institution_')) {
-        scriptProperties.deleteProperty(key);
-        deletedTokens.push(key);
-      } else if (key.startsWith('cursor_')) {
-        scriptProperties.deleteProperty(key);
-        deletedCursors.push(key);
-      }
+    if (scriptProperties.getProperty('PLAID_BANKS_LIST')) {
+      scriptProperties.deleteProperty('PLAID_BANKS_LIST');
+      Logger.log('Deleted PLAID_BANKS_LIST from script properties');
     }
-    
-    Logger.log(`Deleted ${deletedTokens.length} access tokens and ${deletedCursors.length} cursors`);
     
     return {
       success: true,
@@ -528,21 +507,11 @@ function syncPlaidTransactions() {
     // Process each active bank
     for (const bank of activeBanks) {
       try {
-        // Get the bank info with access token
-        const scriptProperties = PropertiesService.getScriptProperties();
-        const bankInfoJson = scriptProperties.getProperty(bank.key);
-        if (!bankInfoJson) {
-          Logger.log(`No bank info found for key: ${bank.key}`);
-          failedBanks.push(bank.name);
-          continue;
-        }
+        // The bank object from activeBanks already contains all the information we need since it comes from PLAID_BANKS_LIST
+        const accessToken = bank.access_token;
         
-        const bankInfo = JSON.parse(bankInfoJson);
-        const accessToken = bankInfo.access_token;
-        
-        // Get the cursor for this bank if it exists
-        const cursorKey = `${bank.key}_cursor`;
-        let cursor = scriptProperties.getProperty(cursorKey) || null;
+        // Use the cursor from the bank object if it exists
+        let cursor = bank.cursor || null;
         
         // Fetch transactions for this bank with cursor-based pagination
         const url = `${PLAID_BASE_URL}/transactions/sync`;
@@ -553,7 +522,7 @@ function syncPlaidTransactions() {
         let bankAccounts = [];
         
         // Log the start of transaction fetching for this bank
-        Logger.log(`Fetching transactions for ${bankInfo.institution_name}`);
+        Logger.log(`Fetching transactions for ${bank.name}`);
         
         // Loop to handle pagination with cursor
         while (hasMoreTransactions) {
@@ -580,7 +549,7 @@ function syncPlaidTransactions() {
           if (responseData.added && responseData.added.length > 0) {
             // Add institution name to each transaction for better identification
             responseData.added.forEach(transaction => {
-              transaction.institution_name = bankInfo.institution_name;
+              transaction.institution_name = bank.name;
             });
             
             // Add this batch to our bank's added transactions
@@ -593,7 +562,7 @@ function syncPlaidTransactions() {
           if (responseData.modified && responseData.modified.length > 0) {
             // Add institution name to each transaction for better identification
             responseData.modified.forEach(transaction => {
-              transaction.institution_name = bankInfo.institution_name;
+              transaction.institution_name = bank.name;
             });
             
             // Add this batch to our bank's modified transactions
@@ -620,8 +589,27 @@ function syncPlaidTransactions() {
           hasMoreTransactions = responseData.has_more;
           
           // Save the cursor after each successful request
-          if (cursor) {
-            scriptProperties.setProperty(cursorKey, cursor);
+          if (cursor) {       
+            // Get the banks list from script properties to update
+            const scriptProperties = PropertiesService.getScriptProperties();
+            let banksList = [];
+            const existingBanksJson = scriptProperties.getProperty('PLAID_BANKS_LIST');
+            if (existingBanksJson) {
+              try {
+                banksList = JSON.parse(existingBanksJson);
+                
+                // Find and update the bank entry with the new cursor
+                const bankIndex = banksList.findIndex(b => b.id === bank.id);
+                if (bankIndex >= 0) {
+                  banksList[bankIndex].cursor = cursor;
+                  
+                  // Save the updated banks list
+                  scriptProperties.setProperty('PLAID_BANKS_LIST', JSON.stringify(banksList));
+                }
+              } catch (e) {
+                Logger.log('Error updating cursor in banks list: ' + e);
+              }
+            }
           }
           
           // Add a small delay to avoid hitting rate limits
@@ -629,7 +617,7 @@ function syncPlaidTransactions() {
         }
         
         // Log the total number of transactions fetched for this bank
-        Logger.log(`Fetched transactions for ${bankInfo.institution_name}. ${bankAddedTransactions.length} added, ${bankModifiedTransactions.length} modified, and ${bankRemovedTransactionIds.length} removed.`);
+        Logger.log(`Fetched transactions for ${bank.name}. ${bankAddedTransactions.length} added, ${bankModifiedTransactions.length} modified, and ${bankRemovedTransactionIds.length} removed.`);
         
         // Add this bank's transactions and accounts to our overall collection
         if (bankAddedTransactions.length > 0 || bankModifiedTransactions.length > 0 || bankRemovedTransactionIds.length > 0) {
@@ -938,6 +926,9 @@ function categorizeWithGemini(row, validCategories) {
   if (!GEMINI_API_KEY) {
     return "";
   }
+
+  // Add a short delay to avoid hitting API rate limits
+  Utilities.sleep(2000);
   
   const memo = row[5] || "";
   const amount = row[1] ? row[1] : (row[2] ? -row[2] : 0);
