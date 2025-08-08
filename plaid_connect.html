@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 10px;
+      }
+      .button {
+        background-color: #4285f4;
+        color: white;
+        padding: 10px 15px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        margin-top: 10px;
+        width: 100%;
+      }
+      .button:hover {
+        background-color: #357ae8;
+      }
+      .status {
+        margin-top: 20px;
+        padding: 10px;
+        border-radius: 4px;
+      }
+      .success {
+        background-color: #d4edda;
+        color: #155724;
+      }
+      .error {
+        background-color: #f8d7da;
+        color: #721c24;
+      }
+      .info {
+        background-color: #e2e3e5;
+        color: #383d41;
+      }
+    </style>
+    <!-- Load the Plaid Link library -->
+    <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+  </head>
+  <body>
+    <h3>Connect to Your Bank</h3>
+    <p>Click the button below to securely connect your bank account using Plaid.</p>
+    
+    <button id="linkButton" class="button">Connect Bank Account</button>
+    
+    <div id="status" class="status" style="display: none;"></div>
+    
+    <script>
+      // Initialize the Plaid Link process when the button is clicked
+      document.getElementById('linkButton').addEventListener('click', function() {
+        // Show loading status
+        showStatus('Initializing connection...', 'info');
+        
+        // Get a link token from the server
+        google.script.run
+          .withSuccessHandler(function(response) {
+            if (response.success) {
+              initializePlaidLink(response.link_token);
+            } else {
+              showStatus('Error: ' + (response.error || 'Failed to get link token'), 'error');
+            }
+          })
+          .withFailureHandler(function(error) {
+            showStatus('Error: ' + error.message, 'error');
+          })
+          .getLinkToken();
+      });
+      
+      // Initialize Plaid Link with the provided token
+      function initializePlaidLink(token) {
+        const handler = Plaid.create({
+          token: token,
+          onSuccess: function(public_token, metadata) {
+            // Show processing status
+            showStatus('Processing your connection...', 'info');
+            
+            // Exchange the public token for an access token
+            google.script.run
+              .withSuccessHandler(function(response) {
+                if (response.success) {
+                  showStatus('Successfully connected to ' + response.institution_name + '! ' + 
+                             (response.transactions_synced ? 'Transactions synced.' : 'No transactions found.'), 
+                             'success');
+                } else {
+                  showStatus('Error: ' + (response.error || 'Failed to exchange token'), 'error');
+                }
+              })
+              .withFailureHandler(function(error) {
+                showStatus('Error: ' + error.message, 'error');
+              })
+              .exchangePublicToken(public_token, metadata);
+          },
+          onExit: function(err, metadata) {
+            if (err != null) {
+              showStatus('Error: ' + err.error_message, 'error');
+            } else {
+              // The user closed the Plaid Link flow without connecting an account
+              showStatus('Connection process was closed.', 'info');
+            }
+          },
+          onEvent: function(eventName, metadata) {
+            // Optional: Handle Link events
+            console.log('Plaid Link event: ' + eventName);
+          }
+        });
+        
+        // Open the Plaid Link interface
+        handler.open();
+      }
+      
+      // Helper function to show status messages
+      function showStatus(message, type) {
+        const statusDiv = document.getElementById('status');
+        statusDiv.textContent = message;
+        statusDiv.className = 'status ' + type;
+        statusDiv.style.display = 'block';
+      }
+    </script>
+  </body>
+</html>
