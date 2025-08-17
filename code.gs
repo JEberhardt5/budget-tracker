@@ -25,6 +25,12 @@ const PENDING_STATUS = "🅿️";
 const GEMINI_API_KEY = ""; // Add your Gemini API key here
 const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"; // Using Gemini 2.5 Flash Lite for speed
 
+// Configuration for AI categorization:
+
+// PRIVACY WARNING: Including the transaction memos will result in more accurate categorization, but Google may retain this
+// information for training purposes. Only enable if you're comfortable with Google storing your transaction memos.
+const INCLUDE_MEMO_IN_PROMPT = false; // By default, will only include Plaid's category guess in the prompt sent to Gemini. If true, will also include the transaction memo.
+
 
 /**
  * Creates a menu entry in the Google Sheets UI when the document is opened.
@@ -936,7 +942,7 @@ function categorizeWithGemini(row, validCategories) {
   const plaid_personal_finance_category = row[3];
 
   // Prepare the prompt for Gemini
-  const prompt = `Categorize this financial transaction into exactly one of the following categories:\n${validCategories.join("\n")}\n\nTransaction details:\nMemo: ${memo}\nPersonal Finance Category according to Plaid: ${plaid_personal_finance_category}\n\nCategory:`;  
+  const prompt = `Categorize this financial transaction into exactly one of the following categories:\n${validCategories.join("\n")}\n\nTransaction details:\n${INCLUDE_MEMO_IN_PROMPT ? `Memo: ${memo}\n` : ""}Personal Finance Category according to Plaid: ${plaid_personal_finance_category}\n\nCategory:`;
   
   // Log the transaction and prompt being sent to Gemini
   Logger.log(`Sending to Gemini - Transaction: "${memo}" Plaid personal finance category: ${plaid_personal_finance_category}`);
