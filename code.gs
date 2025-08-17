@@ -754,7 +754,7 @@ function formatTransactionsForSheet(transactions, accounts) {
 
 /**
  * Reads existing transactions from the sheet.
- * @return {Array} Array of formatted transaction rows from the sheet.
+ * @return {Array} Array of transaction rows from the sheet.
  */
 function readExistingTransactions() {
   try {
@@ -763,10 +763,16 @@ function readExistingTransactions() {
     
     // Get the transaction range
     const transactionRange = sheet.getRange(TRANSACTIONS_RANGE);
-    const values = transactionRange.getValues();
+    const startRow = transactionRange.getRow();
+    const startCol = transactionRange.getColumn();
+    const numCols = transactionRange.getNumColumns();
     
-    // Filter out empty rows and return only rows with data
-    return values.filter(row => row[1] || row[2]);
+    // Get the last row with content in the sheet
+    const lastRow = sheet.getLastRow();
+    const numRows = lastRow - startRow + 1;
+    
+    // Get only the rows that have data
+    return sheet.getRange(startRow, startCol, numRows, numCols).getValues();
   } catch (error) {
     Logger.log(`Error reading existing transactions: ${error}`);
     return [];
@@ -1143,5 +1149,44 @@ function writeTransactionsToSheet(transactionRows) {
   } catch (error) {
     Logger.log(`Error writing transactions to sheet: ${error}`);
     return { success: false, message: `Error: ${error.toString()}` };
+  }
+}
+
+/**
+ * Adds a new empty transaction row at the top of the transactions list.
+ * @return {boolean} True if successful, false otherwise.
+ */
+function addNewTransactionRow() {
+  try {
+    // Get existing transactions
+    const existingTransactions = readExistingTransactions();
+    
+    // Get transaction range to determine number of columns
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetById(TRANSACTIONS_SHEET_ID);
+    const transactionRange = sheet.getRange(TRANSACTIONS_RANGE);
+    const numCols = transactionRange.getNumColumns();
+    
+    // Create an empty row
+    const emptyRow = Array(numCols).fill('');
+    
+    // Add the empty row at the beginning of the existing transactions array
+    existingTransactions.unshift(emptyRow);
+    
+    // Write the modified data back to the sheet
+    const result = writeTransactionsToSheet(existingTransactions);
+    
+    // Show error alert if there was a problem
+    if (!result.success) {
+      Logger.log(result.message);
+      SpreadsheetApp.getUi().alert('Error', result.message, SpreadsheetApp.getUi().ButtonSet.OK);
+    }
+    
+    return result.success;
+  } catch (error) {
+    const errorMessage = `Error adding new transaction row: ${error}`;
+    Logger.log(errorMessage);
+    SpreadsheetApp.getUi().alert('Error', errorMessage, SpreadsheetApp.getUi().ButtonSet.OK);
+    return false;
   }
 }
