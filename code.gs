@@ -771,7 +771,10 @@ function readExistingTransactions() {
     const numCols = transactionRange.getNumColumns();
     
     // Get the last row with content in the sheet
-    const lastRow = sheet.getLastRow();
+    var lastRow = sheet.getLastRow();
+    // Shrink the range even further if needed (to account for the hidden configuration rows)
+    const dates = sheet.getRange(`B1:B${lastRow}`).getValues(); // Check column B for date
+    lastRow -= dates.reverse().findIndex(c=>c[0]!='');
     const numRows = lastRow - startRow + 1;
     
     // Get only the rows that have data
