@@ -89,7 +89,7 @@
                   google.script.run.connectBankAndSync(response.access_token, response.item_id, metadata);
                     
                   // Let the user know they can close the window
-                  showStatus('Successfully connected! Transaction sync is running in the background. You can close this window now.', 'success');
+                  showStatus('Successfully connected! Transaction sync is running in the background. This may take a few minutes. You can close this window now.', 'success');
                 } else {
                   showStatus('Error: ' + (response.error || 'Failed to exchange token'), 'error');
                 }

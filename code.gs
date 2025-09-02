@@ -113,7 +113,10 @@ function getLinkToken() {
       },
       products: PLAID_PRODUCTS,
       country_codes: [PLAID_COUNTRY_CODES],
-      language: "en"
+      language: "en",
+      transactions: {
+        days_requested: 365 // request a full year of transactions
+      }
     };
     
     const options = {
