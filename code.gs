@@ -201,7 +201,7 @@ function exchangePublicToken(publicToken) {
  * @param {string} accessToken - The access token received from Plaid.
  * @param {string} itemId - The item ID received from Plaid.
  * @param {Object} metadata - Metadata from Plaid Link including institution information.
- * @return {Object} Object containing success status, institution name and transaction sync status.
+ * @return {boolean} True if the bank was successfully connected and transactions synced, false otherwise.
  */
 function connectBankAndSync(accessToken, itemId, metadata) {
   try {
@@ -250,14 +250,10 @@ function connectBankAndSync(accessToken, itemId, metadata) {
     // Immediately fetch transactions after successful connection
     const transactionResult = syncTransactions();
     
-    return { 
-      success: true,
-      institution_name: institutionName,
-      transactions_synced: transactionResult.success 
-    };
+    return transactionResult.success;
   } catch (error) {
     Logger.log(`Error connecting bank: ${error}`);
-    return { success: false, error: error.toString(), transactions_synced: false };
+    return false;
   }
 }
 
@@ -321,6 +317,7 @@ function addSingleAccountToConfigSheet(accountName, isCreditCard) {
     // Check if this account already exists in the appropriate column
     for (let i = 0; i < accountsValues.length; i++) {
       if (accountsValues[i][columnIndex] === accountName) {
+        Logger.log(`Account ${accountName} already exists in column ${columnIndex + 1}, skipping.`);
         return; // If account already exists, don't add it again
       }
     }
@@ -1093,7 +1090,9 @@ function categorizeWithGemini(row, validCategories) {
  */
 function getUpdatedTransactions(addedTransactions, modifiedTransactions, removedTransactionIds, accounts) {
   // Read existing transactions from the sheet
-  const existingRows = readExistingTransactions();
+  let existingRows = readExistingTransactions();
+  // Filter out empty rows
+  existingRows = existingRows.filter(row => row[1] !== '' || row[2] !== ''); // Remove rows that have no inflow or outflow
   Logger.log(`Read ${existingRows.length} existing transactions from the sheet`);
 
   // Format added and modified transactions for the sheet
@@ -1226,7 +1225,8 @@ function writeTransactionsToSheet(transactionRows) {
       range.setValues(transactionRows);
     }
     
-    return { success: true, message: `Successfully wrote ${transactionRows.length} transactions to the sheet.` };
+    Logger.log(`Successfully wrote ${transactionRows.length} transactions to the sheet.`);
+    return { success: true };
   } catch (error) {
     Logger.log(`Error writing transactions to sheet: ${error}`);
     return { success: false, message: `Error: ${error.toString()}` };
