@@ -97,7 +97,7 @@
               .withFailureHandler(function(error) {
                 showStatus('Error: ' + error.message, 'error');
               })
-              .exchangePublicToken(public_token);
+              .exchangePublicToken(public_token, metadata);
           },
           onExit: function(err, metadata) {
             if (err != null) {

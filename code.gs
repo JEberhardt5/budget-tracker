@@ -165,10 +165,38 @@ function getLinkToken() {
 /**
  * Exchanges a public token for an access token and item ID.
  * @param {string} publicToken - The public token received from Plaid Link.
+ * @param {Object} metadata - Metadata from Plaid Link including institution information.
  * @return {Object} Object containing success status, access token and item ID or error.
  */
-function exchangePublicToken(publicToken) {
+function exchangePublicToken(publicToken, metadata) {
   try {
+    // Check if the institution is already linked
+    const institutionId = metadata && metadata.institution ? metadata.institution.institution_id : "unknown";
+    const institutionName = getInstitutionName(metadata);
+    
+    // Get existing banks list
+    const scriptProperties = PropertiesService.getScriptProperties();
+    const existingBanksJson = scriptProperties.getProperty('PLAID_BANKS_LIST');
+    
+    if (existingBanksJson) {
+      try {
+        const banksList = JSON.parse(existingBanksJson);
+        
+        // Check if this institution already exists
+        const existingBank = banksList.find(bank => bank.id === institutionId);
+        if (existingBank) {
+          Logger.log(`Institution ${institutionName} (${institutionId}) is already connected.`);
+          return { 
+            success: false, 
+            error: `${institutionName} is already connected to the budget tracker.` 
+          };
+        }
+      } catch (e) {
+        Logger.log('Error parsing existing banks list: ' + e);
+      }
+    }
+    
+    // Exchange the public token for an access token
     const url = `${PLAID_BASE_URL}/item/public_token/exchange`;
     const payload = {
       client_id: CLIENT_ID,
@@ -184,6 +212,8 @@ function exchangePublicToken(publicToken) {
     
     const response = UrlFetchApp.fetch(url, options);
     const responseData = JSON.parse(response.getContentText());
+    
+    Logger.log("Successfully exchanged public token for access token. Response: " + JSON.stringify(responseData));
 
     return { 
       success: true, 
@@ -192,6 +222,49 @@ function exchangePublicToken(publicToken) {
     };
   } catch (error) {
     Logger.log(`Error exchanging public token: ${error}`);
+    return { success: false, error: error.toString() };
+  }
+}
+
+/**
+ * Removes a Plaid Item using the access token.
+ * This prevents Plaid from continuing to charge for the connection.
+ * @param {string} accessToken - The access token for the item to remove.
+ * @return {Object} Object containing success status and any error message.
+ */
+function removePlaidItem(accessToken) {
+  try {
+    if (!accessToken) {
+      Logger.log('No access token provided to removePlaidItem');
+      return { success: false, error: 'No access token provided' };
+    }
+    
+    const url = `${PLAID_BASE_URL}/item/remove`;
+    const payload = {
+      client_id: CLIENT_ID,
+      secret: SECRET,
+      access_token: accessToken
+    };
+    
+    const options = {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+    
+    const response = UrlFetchApp.fetch(url, options);
+    const responseData = JSON.parse(response.getContentText());
+    
+    if (response.getResponseCode() === 200) {
+      Logger.log(`Successfully removed Plaid item with access token: ${accessToken}. Request ID: ${responseData.request_id}`);
+      return { success: true };
+    } else {
+      Logger.log(`Error removing Plaid item with access token: ${accessToken}:\n${JSON.stringify(responseData)}`);
+      return { success: false, error: responseData.error_message || 'Unknown error' };
+    }
+  } catch (error) {
+    Logger.log(`Exception in removePlaidItem: ${error}`);
     return { success: false, error: error.toString() };
   }
 }
@@ -230,16 +303,7 @@ function connectBankAndSync(accessToken, itemId, metadata) {
       date_added: new Date().toISOString(),
       cursor: null // Initialize cursor as null
     };
-    
-    // Check if this institution already exists in the list
-    const existingBankIndex = banksList.findIndex(bank => bank.id === institutionId);
-    if (existingBankIndex >= 0) {
-      // Update existing entry
-      banksList[existingBankIndex] = bankEntry;
-    } else {
-      // Add as new entry
     banksList.push(bankEntry);
-    }
     
     // Save the updated banks list with all bank info
     scriptProperties.setProperty('PLAID_BANKS_LIST', JSON.stringify(banksList));
@@ -407,6 +471,11 @@ function syncBanksWithConfigSheet() {
         activeBanks.push(bank);
       } else {
         removedBanks.push(bank);
+        // Safely remove the item so Plaid does not continue to charge for it
+        const result = removePlaidItem(bank.access_token);
+        if (!result.success) {
+          return { activeBanks: [], removedBanks: [], error: result.error };
+        }
         Logger.log(`Removed bank: ${bank.name} since it was missing from the config sheet.`);
       }
     });
@@ -479,6 +548,28 @@ function confirmResetSpreadsheet() {
  */
 function resetSpreadsheet() {
   try {
+    // Delete the PLAID_BANKS_LIST property and remove all Plaid items
+    const scriptProperties = PropertiesService.getScriptProperties();
+    if (scriptProperties.getProperty('PLAID_BANKS_LIST')) {
+      const banksList = JSON.parse(scriptProperties.getProperty('PLAID_BANKS_LIST'));
+      
+      // Remove each Plaid item to prevent Plaid from continuing to charge for the connections
+      for (const bank of banksList) {
+        if (bank.access_token) {
+          const result = removePlaidItem(bank.access_token);
+          if (result.success) {
+            Logger.log(`Successfully removed Plaid item for institution: ${bank.name || 'Unknown'}`);
+          } else {
+            Logger.log(`Failed to remove Plaid item for institution: ${bank.name || 'Unknown'}, Error: ${result.error}`);
+            return { success: false, message: `Failed to remove Plaid item for institution: ${bank.name || 'Unknown'}, Error: ${result.error}` };
+          }
+        }
+      }
+
+      scriptProperties.deleteProperty('PLAID_BANKS_LIST');
+      Logger.log('Deleted PLAID_BANKS_LIST from script properties');
+    }
+
     // Clear all transactions from the sheet
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetById(TRANSACTIONS_SHEET_ID);
@@ -491,13 +582,6 @@ function resetSpreadsheet() {
     const banksRange = configSheet.getRange(ACCOUNTS_RANGE);
     banksRange.clearContent();
     Logger.log('Cleared all banks from the configuration sheet');
-    
-    // Delete the PLAID_BANKS_LIST property which now contains all bank information
-    const scriptProperties = PropertiesService.getScriptProperties();
-    if (scriptProperties.getProperty('PLAID_BANKS_LIST')) {
-      scriptProperties.deleteProperty('PLAID_BANKS_LIST');
-      Logger.log('Deleted PLAID_BANKS_LIST from script properties');
-    }
     
     return {
       success: true,
