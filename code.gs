@@ -518,8 +518,34 @@ function resetSpreadsheet() {
  */
 function syncPlaidTransactions() {
   try {
-    // First, sync the banks list with the configuration sheet
+    // Check if a sync task is already running
+    const scriptProperties = PropertiesService.getScriptProperties();
+    const syncRunning = scriptProperties.getProperty('SYNC_TASK_RUNNING');
+    
+    if (syncRunning === 'true') {
+      Logger.log('Sync already in progress. Aborting this execution.');
+      return { success: false, message: "Another sync task is already in progress. Please try again later." };
+    }
+    
+    // Set the lock flag
+    scriptProperties.setProperty('SYNC_TASK_RUNNING', 'true');
+    
+    // Protect TRANSACTIONS_RANGE and ACCOUNTS_RANGE to prevent edits during sync
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const transactionsSheet = ss.getSheetById(TRANSACTIONS_SHEET_ID);
+    const transactionsRange = transactionsSheet.getRange(TRANSACTIONS_RANGE);
+    transactionsRange.protect().setDescription('Sync in progress').setWarningOnly(true);
+    
+    const configSheet = ss.getSheetById(CONFIGURATION_SHEET_ID);
+    const accountsRange = configSheet.getRange(ACCOUNTS_RANGE);
+    accountsRange.protect().setDescription('Sync in progress').setWarningOnly(true);
+    
+    // Sync the banks list with the configuration sheet
     const syncResult = syncBanksWithConfigSheet();
+    if (syncResult.error) {
+      return { success: false, message: syncResult.error };
+    }
+    
     let removedBanksMessage = "";
     if (syncResult.removedBanks && syncResult.removedBanks.length > 0) {
       const removedNames = syncResult.removedBanks.map(bank => bank.name).join(", ");
@@ -729,6 +755,28 @@ function syncPlaidTransactions() {
   } catch (error) {
     Logger.log(`Error syncing transactions: ${error}`);
     return { success: false, message: `Error: ${error.toString()}` };
+  } finally {
+    // Always clear the lock flag when done, even if there was an error
+    const scriptProperties = PropertiesService.getScriptProperties();
+    scriptProperties.setProperty('SYNC_TASK_RUNNING', 'false');
+    
+    // Unprotect the TRANSACTIONS_RANGE when sync is complete
+    try {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const sheet = ss.getSheetById(TRANSACTIONS_SHEET_ID);
+      const protections = sheet.getProtections(SpreadsheetApp.ProtectionType.RANGE);
+      
+      // Find and remove the protection we added
+      for (let i = 0; i < protections.length; i++) {
+        const protection = protections[i];
+        if (protection.getDescription() === 'Sync in progress') {
+          protection.remove();
+          break;
+        }
+      }
+    } catch (unprotectError) {
+      Logger.log(`Error removing protection: ${unprotectError}`);
+    }
   }
 }
 
@@ -1191,6 +1239,14 @@ function writeTransactionsToSheet(transactionRows) {
  */
 function addNewTransactionRow() {
   try {
+    // Check if a sync task is already running
+    const scriptProperties = PropertiesService.getScriptProperties();
+    const syncRunning = scriptProperties.getProperty('SYNC_TASK_RUNNING');
+    
+    if (syncRunning === 'true') {
+      throw new Error('Sync task is already running. Please wait for it to finish before adding a new transaction row.');
+    }
+
     // Get existing transactions
     const existingTransactions = readExistingTransactions();
     
@@ -1211,13 +1267,12 @@ function addNewTransactionRow() {
     
     // Show error alert if there was a problem
     if (!result.success) {
-      Logger.log(result.message);
       SpreadsheetApp.getUi().alert('Error', result.message, SpreadsheetApp.getUi().ButtonSet.OK);
     }
     
     return result.success;
   } catch (error) {
-    const errorMessage = `Error adding new transaction row: ${error}`;
+    const errorMessage = `Error adding new transaction row: ${error.message}`;
     Logger.log(errorMessage);
     SpreadsheetApp.getUi().alert('Error', errorMessage, SpreadsheetApp.getUi().ButtonSet.OK);
     return false;
