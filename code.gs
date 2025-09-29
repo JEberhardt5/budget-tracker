@@ -54,7 +54,6 @@ function onOpen() {
  */
 function onEdit(e) {
   try {
-    // Set categorization source to "USER" for manually categorized transactions
     const editedRange = e.range;
     const sheet = editedRange.getSheet();
     // Check if this is the transactions sheet
@@ -62,6 +61,34 @@ function onEdit(e) {
       return; // Exit if not in the transactions sheet
     }
     
+    // Check if the accounts dropdown was edited and update the filter
+    if (editedRange.getRow() === 2 && editedRange.getColumn() === 7) { // Dropdown is in G2
+      const accountSelection = editedRange.getValue();
+      
+      // Get the existing filter
+      const filter = sheet.getFilter();
+      
+      if (filter) {
+        const accountColumn = 6; // Column F is the Account column
+        
+        if (accountSelection && accountSelection !== 'All Accounts') {
+          // Create filter criteria that matches the selected account
+          const criteria = SpreadsheetApp.newFilterCriteria()
+            .whenFormulaSatisfied(`=OR(F8="${accountSelection}", F8="")`)
+            .build();
+          
+          filter.setColumnFilterCriteria(accountColumn, criteria);
+        } else {
+          // Clear the filter criteria for the account column when 'All Accounts' is selected
+          filter.removeColumnFilterCriteria(accountColumn);
+        }
+      } else {
+        Logger.log("No filter found on the sheet. A filter should be pre-created on the transactions range.");
+      }
+      return;
+    }
+    
+    // Set categorization source to "USER" for manually categorized transactions
     const categoriesRange = sheet.getRange(CATEGORIES_RANGE);
     // Get the range of the edited cells that intersects with the categories range
     const FIRSTROW = Math.max(editedRange.getRow(), categoriesRange.getRow());
@@ -157,7 +184,7 @@ function exchangePublicToken(publicToken) {
     
     const response = UrlFetchApp.fetch(url, options);
     const responseData = JSON.parse(response.getContentText());
-    
+
     return { 
       success: true, 
       access_token: responseData.access_token,
@@ -211,7 +238,7 @@ function connectBankAndSync(accessToken, itemId, metadata) {
       banksList[existingBankIndex] = bankEntry;
     } else {
       // Add as new entry
-      banksList.push(bankEntry);
+    banksList.push(bankEntry);
     }
     
     // Save the updated banks list with all bank info
