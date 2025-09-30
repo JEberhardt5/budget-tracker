@@ -622,19 +622,13 @@ function syncPlaidTransactions() {
     accountsRange.protect().setDescription('Sync in progress').setWarningOnly(true);
     
     // Sync the banks list with the configuration sheet
-    const syncResult = syncBanksWithConfigSheet();
-    if (syncResult.error) {
-      return { success: false, message: syncResult.error };
-    }
-    
-    let removedBanksMessage = "";
-    if (syncResult.removedBanks && syncResult.removedBanks.length > 0) {
-      const removedNames = syncResult.removedBanks.map(bank => bank.name).join(", ");
-      removedBanksMessage = `Removed ${syncResult.removedBanks.length} banks no longer in configuration sheet: ${removedNames}.\n`;
+    const bankSyncResult = syncBanksWithConfigSheet();
+    if (bankSyncResult.error) {
+      return { success: false, message: bankSyncResult.error };
     }
     
     // Get the active banks list
-    const activeBanks = syncResult.activeBanks;
+    const activeBanks = bankSyncResult.activeBanks;
     if (!activeBanks || activeBanks.length === 0) {
       return { success: false, message: "No active banks found. Please connect to a bank first." };
     }
@@ -783,13 +777,30 @@ function syncPlaidTransactions() {
           addedTransactions = addedTransactions.concat(filteredAddedTransactions);
           modifiedTransactions = modifiedTransactions.concat(bankModifiedTransactions);
           removedTransactionIds = removedTransactionIds.concat(bankRemovedTransactionIds);
-          allAccounts = allAccounts.concat(bankAccounts);
-          successfulBanks.push(bank.name);
         }
+        allAccounts = allAccounts.concat(bankAccounts);
+        successfulBanks.push(bank.name);
       } catch (bankError) {
         Logger.log(`Error fetching transactions for bank ${bank.name}: ${bankError}`);
         failedBanks.push(bank.name);
       }
+    }
+    
+    syncStatusMessage = "";
+    if (bankSyncResult.removedBanks && bankSyncResult.removedBanks.length > 0) {
+      const removedNames = bankSyncResult.removedBanks.map(bank => bank.name).join(", ");
+      syncStatusMessage += `Removed ${bankSyncResult.removedBanks.length} banks no longer in configuration sheet: ${removedNames}.\n`;
+    }
+    if (successfulBanks.length > 0) {
+      syncStatusMessage += `Successfully synced transactions from ${successfulBanks.length} institutions: ${successfulBanks.join(", ")}.\n`;
+      if (addedTransactions.length > 0 || modifiedTransactions.length > 0 || removedTransactionIds.length > 0) {
+        syncStatusMessage += `Added: ${addedTransactions.length}, Modified: ${modifiedTransactions.length}, Removed: ${removedTransactionIds.length}.\n`;
+      } else {
+        syncStatusMessage += `No new transactions found.\n`;
+      }
+    }
+    if (failedBanks.length > 0) {
+      syncStatusMessage += `Failed to sync ${failedBanks.length} institutions: ${failedBanks.join(", ")}. See logs for details.\n`;
     }
     
     // Process the transactions and combine with existing transactions
@@ -810,29 +821,13 @@ function syncPlaidTransactions() {
           const addedCount = addedTransactions.length;
           const modifiedCount = modifiedTransactions.length;
           const removedCount = removedTransactionIds.length;
-          
-          return {
-            success: true, 
-            message: `Successfully synced transactions from ${successfulBanks.length} banks: ${successfulBanks.join(", ")}\n` +
-                    `${removedBanksMessage}` +
-                    `Added: ${addedCount}, Modified: ${modifiedCount}, Removed: ${removedCount}. ` +
-                    `${failedBanks.length > 0 ? `Failed to sync ${failedBanks.length} banks: ${failedBanks.join(", ")}` : ''}` 
-          };
         } else {
           return result; // Pass through any errors from writeTransactionsToSheet
         }
-      } else {
-        return {
-          success: true, 
-          message: `${removedBanksMessage}No transactions found after processing.` 
-        };
       }
-    } else {
-      return {
-        success: true, 
-        message: `${removedBanksMessage}No new transactions found.` 
-      };
     }
+
+    return { success: true, message: syncStatusMessage };
   } catch (error) {
     Logger.log(`Error syncing transactions: ${error}`);
     return { success: false, message: `Error: ${error.toString()}` };
