@@ -594,6 +594,174 @@ function resetSpreadsheet() {
 }
 
 /**
+ * Fetches transactions from all active banks using Plaid's transactions/sync endpoint.
+ * @param {Array} institutions - Array of financial institution objects in the format of the PLAID_BANKS_LIST script property
+ * @return {Object} Object containing transaction data, accounts, and bank status information.
+ */
+function fetchPlaidTransactions(institutions) {
+  let addedTransactions = [];
+  let modifiedTransactions = [];
+  let removedTransactionIds = [];
+  let allAccounts = [];
+  let successfulBanks = [];
+  let failedBanks = [];
+  
+  // Process each active bank
+  for (const bank of institutions) {
+    try {
+      // The bank object from activeBanks already contains all the information we need since it comes from PLAID_BANKS_LIST
+      const accessToken = bank.access_token;
+      
+      // Use the cursor from the bank object if it exists
+      let cursor = bank.cursor || null;
+      
+      // Fetch transactions for this bank with cursor-based pagination
+      const url = `${PLAID_BASE_URL}/transactions/sync`;
+      let hasMoreTransactions = true;
+      let bankAddedTransactions = [];
+      let bankModifiedTransactions = [];
+      let bankRemovedTransactionIds = [];
+      let bankAccounts = [];
+      
+      // Log the start of transaction fetching for this bank
+      Logger.log(`Fetching transactions for ${bank.name}`);
+      
+      // Loop to handle pagination with cursor
+      while (hasMoreTransactions) {
+        const payload = {
+          client_id: CLIENT_ID,
+          secret: SECRET,
+          access_token: accessToken,
+          cursor: cursor
+        };
+        
+        const options = {
+          method: "post",
+          contentType: "application/json",
+          payload: JSON.stringify(payload)
+        };
+        
+        const response = UrlFetchApp.fetch(url, options);
+        const responseData = JSON.parse(response.getContentText());
+        
+        // Update the cursor for the next request
+        cursor = responseData.next_cursor;
+        
+        // Process added transactions
+        if (responseData.added && responseData.added.length > 0) {
+          // Add institution name to each transaction for better identification
+          responseData.added.forEach(transaction => {
+            transaction.institution_name = bank.name;
+          });
+          
+          // Add this batch to our bank's added transactions
+          bankAddedTransactions = bankAddedTransactions.concat(responseData.added);
+
+          Logger.log("Added transactions:\n" + JSON.stringify(responseData.added));
+        }
+        
+        // Process modified transactions
+        if (responseData.modified && responseData.modified.length > 0) {
+          // Add institution name to each transaction for better identification
+          responseData.modified.forEach(transaction => {
+            transaction.institution_name = bank.name;
+          });
+          
+          // Add this batch to our bank's modified transactions
+          bankModifiedTransactions = bankModifiedTransactions.concat(responseData.modified);
+
+          Logger.log("Modified transactions:\n" + JSON.stringify(responseData.modified));
+        }
+        
+        // Process removed transactions
+        if (responseData.removed && responseData.removed.length > 0) {
+          // Add this batch to our bank's removed transaction IDs
+          const removedIds = responseData.removed.map(item => item.transaction_id);
+          bankRemovedTransactionIds = bankRemovedTransactionIds.concat(removedIds);
+
+          Logger.log("Removed transactions:\n" + JSON.stringify(responseData.removed));
+        }
+        
+        // Add accounts if present
+        if (responseData.accounts && responseData.accounts.length > 0) {
+          bankAccounts = bankAccounts.concat(responseData.accounts);
+        }
+        
+        // Check if we need to fetch more transactions
+        hasMoreTransactions = responseData.has_more;
+        
+        // Save the cursor after each successful request
+        if (cursor) {       
+          // Get the banks list from script properties to update
+          const scriptProperties = PropertiesService.getScriptProperties();
+          let banksList = [];
+          const existingBanksJson = scriptProperties.getProperty('PLAID_BANKS_LIST');
+          if (existingBanksJson) {
+            try {
+              banksList = JSON.parse(existingBanksJson);
+              
+              // Find and update the bank entry with the new cursor
+              const bankIndex = banksList.findIndex(b => b.id === bank.id);
+              if (bankIndex >= 0) {
+                banksList[bankIndex].cursor = cursor;
+                
+                // Save the updated banks list
+                scriptProperties.setProperty('PLAID_BANKS_LIST', JSON.stringify(banksList));
+              }
+            } catch (e) {
+              Logger.log('Error updating cursor in banks list: ' + e);
+            }
+          }
+        }
+        
+        // Add a small delay to avoid hitting rate limits
+        Utilities.sleep(100);
+      }
+      
+      // Log the total number of transactions fetched for this bank
+      Logger.log(`Fetched transactions for ${bank.name}. ${bankAddedTransactions.length} added, ${bankModifiedTransactions.length} modified, and ${bankRemovedTransactionIds.length} removed.`);
+      
+      // Add this bank's transactions and accounts to our overall collection
+      if (bankAddedTransactions.length > 0 || bankModifiedTransactions.length > 0 || bankRemovedTransactionIds.length > 0) {
+        // Filter added transactions to only include those on or after TRANSACTION_DATA_START_DATE
+        const startDate = new Date(TRANSACTION_DATA_START_DATE);
+        
+        // Filter added transactions
+        const filteredAddedTransactions = bankAddedTransactions.filter(transaction => {
+          const transactionDate = new Date(transaction.date);
+          return transactionDate >= startDate;
+        });
+        
+        // Log how many transactions were filtered out
+        const numFiltered = bankAddedTransactions.length - filteredAddedTransactions.length;
+        if (numFiltered > 0) {
+          Logger.log(`Filtered out ${numFiltered} new transactions which occurred before ${TRANSACTION_DATA_START_DATE}`);
+        }
+        
+        // Add transactions from this batch to our collections
+        addedTransactions = addedTransactions.concat(filteredAddedTransactions);
+        modifiedTransactions = modifiedTransactions.concat(bankModifiedTransactions);
+        removedTransactionIds = removedTransactionIds.concat(bankRemovedTransactionIds);
+      }
+      allAccounts = allAccounts.concat(bankAccounts);
+      successfulBanks.push(bank.name);
+    } catch (bankError) {
+      Logger.log(`Error fetching transactions for bank ${bank.name}: ${bankError}`);
+      failedBanks.push(bank.name);
+    }
+  }
+  
+  return {
+    addedTransactions,
+    modifiedTransactions,
+    removedTransactionIds,
+    allAccounts,
+    successfulBanks,
+    failedBanks
+  };
+}
+
+/**
  * Fetches transactions from all connected banks and writes them to the sheet.
  * @return {Object} Object containing success status and message.
  */
@@ -630,161 +798,17 @@ function syncPlaidTransactions() {
     // Get the active banks list
     const activeBanks = bankSyncResult.activeBanks;
     if (!activeBanks || activeBanks.length === 0) {
-      return { success: false, message: "No active banks found. Please connect to a bank first." };
+      return { success: false, message: "No financial institutions found. Please add an account first." };
     }
     
-    // Prepare to collect transactions
-    let addedTransactions = [];
-    let modifiedTransactions = [];
-    let removedTransactionIds = [];
-    let allAccounts = [];
-    let successfulBanks = [];
-    let failedBanks = [];
-    
-    // Process each active bank
-    for (const bank of activeBanks) {
-      try {
-        // The bank object from activeBanks already contains all the information we need since it comes from PLAID_BANKS_LIST
-        const accessToken = bank.access_token;
-        
-        // Use the cursor from the bank object if it exists
-        let cursor = bank.cursor || null;
-        
-        // Fetch transactions for this bank with cursor-based pagination
-        const url = `${PLAID_BASE_URL}/transactions/sync`;
-        let hasMoreTransactions = true;
-        let bankAddedTransactions = [];
-        let bankModifiedTransactions = [];
-        let bankRemovedTransactionIds = [];
-        let bankAccounts = [];
-        
-        // Log the start of transaction fetching for this bank
-        Logger.log(`Fetching transactions for ${bank.name}`);
-        
-        // Loop to handle pagination with cursor
-        while (hasMoreTransactions) {
-          const payload = {
-            client_id: CLIENT_ID,
-            secret: SECRET,
-            access_token: accessToken,
-            cursor: cursor
-          };
-          
-          const options = {
-            method: "post",
-            contentType: "application/json",
-            payload: JSON.stringify(payload)
-          };
-          
-          const response = UrlFetchApp.fetch(url, options);
-          const responseData = JSON.parse(response.getContentText());
-          
-          // Update the cursor for the next request
-          cursor = responseData.next_cursor;
-          
-          // Process added transactions
-          if (responseData.added && responseData.added.length > 0) {
-            // Add institution name to each transaction for better identification
-            responseData.added.forEach(transaction => {
-              transaction.institution_name = bank.name;
-            });
-            
-            // Add this batch to our bank's added transactions
-            bankAddedTransactions = bankAddedTransactions.concat(responseData.added);
-
-            Logger.log("Added transactions:\n" + JSON.stringify(responseData.added));
-          }
-          
-          // Process modified transactions
-          if (responseData.modified && responseData.modified.length > 0) {
-            // Add institution name to each transaction for better identification
-            responseData.modified.forEach(transaction => {
-              transaction.institution_name = bank.name;
-            });
-            
-            // Add this batch to our bank's modified transactions
-            bankModifiedTransactions = bankModifiedTransactions.concat(responseData.modified);
-
-            Logger.log("Modified transactions:\n" + JSON.stringify(responseData.modified));
-          }
-          
-          // Process removed transactions
-          if (responseData.removed && responseData.removed.length > 0) {
-            // Add this batch to our bank's removed transaction IDs
-            const removedIds = responseData.removed.map(item => item.transaction_id);
-            bankRemovedTransactionIds = bankRemovedTransactionIds.concat(removedIds);
-
-            Logger.log("Removed transactions:\n" + JSON.stringify(responseData.removed));
-          }
-          
-          // Add accounts if present
-          if (responseData.accounts && responseData.accounts.length > 0) {
-            bankAccounts = bankAccounts.concat(responseData.accounts);
-          }
-          
-          // Check if we need to fetch more transactions
-          hasMoreTransactions = responseData.has_more;
-          
-          // Save the cursor after each successful request
-          if (cursor) {       
-            // Get the banks list from script properties to update
-            const scriptProperties = PropertiesService.getScriptProperties();
-            let banksList = [];
-            const existingBanksJson = scriptProperties.getProperty('PLAID_BANKS_LIST');
-            if (existingBanksJson) {
-              try {
-                banksList = JSON.parse(existingBanksJson);
-                
-                // Find and update the bank entry with the new cursor
-                const bankIndex = banksList.findIndex(b => b.id === bank.id);
-                if (bankIndex >= 0) {
-                  banksList[bankIndex].cursor = cursor;
-                  
-                  // Save the updated banks list
-                  scriptProperties.setProperty('PLAID_BANKS_LIST', JSON.stringify(banksList));
-                }
-              } catch (e) {
-                Logger.log('Error updating cursor in banks list: ' + e);
-              }
-            }
-          }
-          
-          // Add a small delay to avoid hitting rate limits
-          Utilities.sleep(100);
-        }
-        
-        // Log the total number of transactions fetched for this bank
-        Logger.log(`Fetched transactions for ${bank.name}. ${bankAddedTransactions.length} added, ${bankModifiedTransactions.length} modified, and ${bankRemovedTransactionIds.length} removed.`);
-        
-        // Add this bank's transactions and accounts to our overall collection
-        if (bankAddedTransactions.length > 0 || bankModifiedTransactions.length > 0 || bankRemovedTransactionIds.length > 0) {
-          // Filter added transactions to only include those on or after TRANSACTION_DATA_START_DATE
-          const startDate = new Date(TRANSACTION_DATA_START_DATE);
-          
-          // Filter added transactions
-          const filteredAddedTransactions = bankAddedTransactions.filter(transaction => {
-            const transactionDate = new Date(transaction.date);
-            return transactionDate >= startDate;
-          });
-          
-          // Log how many transactions were filtered out
-          const numFiltered = bankAddedTransactions.length - filteredAddedTransactions.length;
-          if (numFiltered > 0) {
-            Logger.log(`Filtered out ${numFiltered} new transactions which occurred before ${TRANSACTION_DATA_START_DATE}`);
-          }
-          
-          // Add transactions from this batch to our collections
-          addedTransactions = addedTransactions.concat(filteredAddedTransactions);
-          modifiedTransactions = modifiedTransactions.concat(bankModifiedTransactions);
-          removedTransactionIds = removedTransactionIds.concat(bankRemovedTransactionIds);
-        }
-        allAccounts = allAccounts.concat(bankAccounts);
-        successfulBanks.push(bank.name);
-      } catch (bankError) {
-        Logger.log(`Error fetching transactions for bank ${bank.name}: ${bankError}`);
-        failedBanks.push(bank.name);
-      }
-    }
+    // Fetch transactions from all active banks
+    const transactionData = fetchPlaidTransactions(activeBanks);
+    const addedTransactions = transactionData.addedTransactions;
+    const modifiedTransactions = transactionData.modifiedTransactions;
+    const removedTransactionIds = transactionData.removedTransactionIds;
+    const allAccounts = transactionData.allAccounts;
+    const successfulBanks = transactionData.successfulBanks;
+    const failedBanks = transactionData.failedBanks;
     
     syncStatusMessage = "";
     if (bankSyncResult.removedBanks && bankSyncResult.removedBanks.length > 0) {
@@ -792,7 +816,7 @@ function syncPlaidTransactions() {
       syncStatusMessage += `Removed ${bankSyncResult.removedBanks.length} banks no longer in configuration sheet: ${removedNames}.\n`;
     }
     if (successfulBanks.length > 0) {
-      syncStatusMessage += `Successfully synced transactions from ${successfulBanks.length} institutions: ${successfulBanks.join(", ")}.\n`;
+      syncStatusMessage += `Successfully synced transactions from ${successfulBanks.length} institutions: ${successfulBanks.join(", ")}. `;
       if (addedTransactions.length > 0 || modifiedTransactions.length > 0 || removedTransactionIds.length > 0) {
         syncStatusMessage += `Added: ${addedTransactions.length}, Modified: ${modifiedTransactions.length}, Removed: ${removedTransactionIds.length}.\n`;
       } else {
@@ -803,7 +827,7 @@ function syncPlaidTransactions() {
       syncStatusMessage += `Failed to sync ${failedBanks.length} institutions: ${failedBanks.join(", ")}. See logs for details.\n`;
     }
     
-    // Process the transactions and combine with existing transactions
+    // Combine the new transactions with the existing transactions
     if (addedTransactions.length > 0 || modifiedTransactions.length > 0 || removedTransactionIds.length > 0) {
       // Process transactions with the sync endpoint results
       let updatedTransactions = getUpdatedTransactions(
